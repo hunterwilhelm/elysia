@@ -1438,4 +1438,489 @@ describe('Macro', () => {
 
 		expect(invalid3.status).toBe(422)
 	})
+
+	it('introspect: shorthand style 1', () => {
+		let introspectCalled = false
+		let capturedIntrospectOptions: any
+		let capturedMetadata: any
+
+		const aPlugin = new Elysia({ name: 'a-plugin' }).macro('a', {
+			introspect(introspectOptions, metadata) {
+				introspectCalled = true
+				capturedIntrospectOptions = introspectOptions
+				capturedMetadata = metadata
+			}
+		})
+
+		const app = new Elysia()
+			.use(aPlugin)
+			.get('/route1', () => 'Hello from route1')
+			.post('/route2/:id', () => 'Hello from route2', {
+				a: true
+			})
+
+		expect(introspectCalled).toBe(true)
+		expect(capturedIntrospectOptions).toEqual({
+			a: true
+		})
+		expect(capturedMetadata).toHaveProperty('path', '/route2/:id')
+		expect(capturedMetadata).toHaveProperty('method', 'POST')
+	})
+
+	it('introspect: shorthand style 2', () => {
+		let introspectCalled = false
+		let capturedIntrospectOptions: any
+		let capturedMetadata: any
+
+		const aPlugin = new Elysia({ name: 'a-plugin' }).macro({
+			a: {
+				introspect(introspectOptions, metadata) {
+					introspectCalled = true
+					capturedIntrospectOptions = introspectOptions
+					capturedMetadata = metadata
+				}
+			}
+		})
+
+		const app = new Elysia()
+			.use(aPlugin)
+			.get('/route1', () => 'Hello from route1')
+			.post('/route2/:id', () => 'Hello from route2', {
+				a: true
+			})
+
+		expect(introspectCalled).toBe(true)
+		expect(capturedIntrospectOptions).toEqual({
+			a: true
+		})
+		expect(capturedMetadata).toHaveProperty('path', '/route2/:id')
+		expect(capturedMetadata).toHaveProperty('method', 'POST')
+	})
+
+	it('introspect: longhand style', () => {
+		let introspectCalled = false
+		let aOptions: any
+		let capturedIntrospectOptions: any
+		let capturedMetadata: any
+
+		const aPlugin = new Elysia({ name: 'a-plugin' }).macro({
+			a: (options) => ({
+				introspect(introspectOptions, metadata) {
+					introspectCalled = true
+					aOptions = options
+					capturedIntrospectOptions = introspectOptions
+					capturedMetadata = metadata
+				}
+			})
+		})
+
+		const app = new Elysia()
+			.use(aPlugin)
+			.get('/route1', () => 'Hello from route1')
+			.post('/route2/:id', () => 'Hello from route2', {
+				a: true
+			})
+
+		expect(introspectCalled).toBe(true)
+		expect(aOptions).toBe(true)
+		expect(capturedIntrospectOptions).toEqual({
+			a: true
+		})
+		expect(capturedMetadata).toHaveProperty('path', '/route2/:id')
+		expect(capturedMetadata).toHaveProperty('method', 'POST')
+	})
+
+	it('introspect: guard with conflicting macros', () => {
+		const data: {
+			options: any
+			introspectOptions: any
+			metadata: any
+		}[] = []
+
+		const aPlugin = new Elysia({ name: 'a-plugin' }).macro({
+			a: (options) => ({
+				introspect(introspectOptions, metadata) {
+					data.push({ options, introspectOptions, metadata })
+				}
+			})
+		})
+
+		const app = new Elysia().use(aPlugin).guard({ a: true }, (app) =>
+			app
+				.get('/route1', () => 'Hello from route1')
+				.post('/route2/:id', () => 'Hello from route2', {
+					a: false
+				})
+		)
+
+		expect(data).toEqual([
+			{
+				options: false,
+				introspectOptions: { a: false },
+				metadata: { path: '/route2/:id', method: 'POST' }
+			},
+			{
+				options: true,
+				introspectOptions: { a: true },
+				metadata: { path: '/route1', method: 'GET' }
+			},
+			{
+				options: true,
+				introspectOptions: { a: true },
+				metadata: { path: '/route2/:id', method: 'POST' }
+			}
+		])
+	})
+
+	it('introspect: resolve guard', () => {
+		const data: {
+			introspectOptions: any
+			metadata: any
+		}[] = []
+
+		const app = new Elysia()
+			.macro({
+				account: (a: boolean) => ({
+					introspect(introspectOptions, metadata) {
+						data.push({ introspectOptions, metadata })
+					},
+					resolve: () => ({
+						account: 'A'
+					})
+				})
+			})
+			.guard({
+				account: true
+			})
+			.get('/local', ({ account }) => account === 'A')
+
+		expect(data).toEqual([
+			{
+				introspectOptions: { account: true },
+				metadata: { path: '/local', method: 'GET' }
+			}
+		])
+	})
+
+	it('introspect: nested routes', () => {
+		const data: {
+			introspectOptions: any
+			metadata: any
+		}[] = []
+
+		const app = new Elysia({ prefix: '/prefix' })
+
+			.macro({
+				a: (a: boolean) => ({
+					introspect(introspectOptions, metadata) {
+						data.push({ introspectOptions, metadata })
+					}
+				})
+			})
+			.group('/group', (app) =>
+				app
+					.get('/route1', () => 'Hello from route1')
+					.post('/route2/:id', () => 'Hello from route2', {
+						a: true
+					})
+			)
+
+		expect(data).toEqual([
+			{
+				introspectOptions: { a: true },
+				metadata: { path: '/prefix/group/route2/:id', method: 'POST' }
+			}
+		])
+	})
+
+	it('introspect: macro inside groups', () => {
+		const data: {
+			introspectOptions: any
+			metadata: any
+		}[] = []
+
+		const app = new Elysia({ prefix: '/prefix' }).group('/group1', (app) =>
+			app.group('/group2', (app) =>
+				app
+					.macro({
+						a: (a: boolean) => ({
+							introspect(introspectOptions, metadata) {
+								data.push({ introspectOptions, metadata })
+							}
+						})
+					})
+					.get('/route1', () => 'Hello from route1')
+					.post('/route2/:id', () => 'Hello from route2', {
+						a: true
+					})
+			)
+		)
+
+		expect(data).toEqual([
+			{
+				introspectOptions: { a: true },
+				metadata: {
+					path: '/prefix/group1/group2/route2/:id',
+					method: 'POST'
+				}
+			}
+		])
+	})
+
+	it('introspect: macro inside guard', () => {
+		const data: {
+			introspectOptions: any
+			metadata: any
+		}[] = []
+
+		const app = new Elysia({ prefix: '/prefix' }).guard({}, (app) =>
+			app
+				.macro({
+					a: (a: boolean) => ({
+						introspect(introspectOptions, metadata) {
+							data.push({ introspectOptions, metadata })
+						}
+					})
+				})
+				.get('/route1', () => 'Hello from route1')
+				.post('/route2/:id', () => 'Hello from route2', {
+					a: true
+				})
+		)
+
+		expect(data).toEqual([
+			{
+				introspectOptions: { a: true },
+				metadata: {
+					path: '/route2/:id',
+					method: 'POST'
+				}
+			}
+		])
+	})
+
+	it('introspect: macro inside nested guards', () => {
+		const data: {
+			introspectOptions: any
+			metadata: any
+		}[] = []
+
+		const app = new Elysia({ prefix: '/prefix' }).guard({}, (app) =>
+			app.guard({}, (app) =>
+				app
+					.macro({
+						a: (a: boolean) => ({
+							introspect(introspectOptions, metadata) {
+								data.push({ introspectOptions, metadata })
+							}
+						})
+					})
+					.get('/route1', () => 'Hello from route1')
+					.post('/route2/:id', () => 'Hello from route2', {
+						a: true
+					})
+			)
+		)
+
+		expect(data).toEqual([
+			{
+				introspectOptions: { a: true },
+				metadata: {
+					path: '/route2/:id',
+					method: 'POST'
+				}
+			}
+		])
+	})
+
+	it('introspect: macro inside guard with group', () => {
+		const data: {
+			introspectOptions: any
+			metadata: any
+		}[] = []
+
+		const app = new Elysia({ prefix: '/prefix' })
+			.group('/group1', (app) =>
+				app.guard({}, (app) =>
+					app
+						.macro({
+							a: (a: boolean) => ({
+								introspect(introspectOptions, metadata) {
+									data.push({ introspectOptions, metadata })
+								}
+							})
+						})
+						.get('/route1', () => 'Hello from route1')
+						.post('/route2/:id', () => 'Hello from route2', {
+							a: true
+						})
+				)
+			)
+
+		expect(data).toEqual([
+			{
+				introspectOptions: { a: true },
+				metadata: {
+					path: '/route2/:id',
+					method: 'POST'
+				}
+			}
+		])
+	})
+
+	it('introspect: macro inside group with guard', () => {
+		const data: {
+			introspectOptions: any
+			metadata: any
+		}[] = []
+
+		const app = new Elysia({ prefix: '/prefix' })
+			.guard({}, (app) =>
+				app.group('/group1', (app) =>
+					app
+						.macro({
+							a: (a: boolean) => ({
+								introspect(introspectOptions, metadata) {
+									data.push({ introspectOptions, metadata })
+								}
+							})
+						})
+						.get('/route1', () => 'Hello from route1')
+						.post('/route2/:id', () => 'Hello from route2', {
+							a: true
+						})
+				)
+			)
+
+		expect(data).toEqual([
+			{
+				introspectOptions: { a: true },
+				metadata: {
+					path: '/group1/route2/:id',
+					method: 'POST'
+				}
+			}
+		])
+	})
+
+	it('introspect: not called for routes without macros', () => {
+		let introspectCalled = false
+
+		const aPlugin = new Elysia({ name: 'a-plugin' }).macro({
+			a: () => ({
+				introspect() {
+					introspectCalled = true
+				}
+			})
+		})
+
+		new Elysia().use(aPlugin).get('/route1', () => 'Hello from route1')
+
+		expect(introspectCalled).toBe(false)
+	})
+
+	it('introspect: multiple macros', () => {
+		const aData: {
+			introspectOptions: any
+			metadata: any
+		}[] = []
+		const bData: {
+			introspectOptions: any
+			metadata: any
+		}[] = []
+
+		const aPlugin = new Elysia({ name: 'a-plugin' }).macro({
+			a: () => ({
+				introspect(introspectOptions, metadata) {
+					aData.push({ introspectOptions, metadata })
+				}
+			}),
+			b: () => ({
+				introspect(introspectOptions, metadata) {
+					bData.push({ introspectOptions, metadata })
+				}
+			})
+		})
+
+		const app = new Elysia()
+			.use(aPlugin)
+			.get('/route', () => 'Hello from route')
+			.post('/routeA/:a', () => 'Hello from routeA', {
+				a: true
+			})
+			.delete('/routeB/:b', () => 'Hello from routeB', {
+				b: true
+			})
+			.put('/routeAB/:ab', () => 'Hello from routeAB', {
+				a: true,
+				b: true
+			})
+
+		expect(aData).toEqual([
+			{
+				introspectOptions: { a: true },
+				metadata: { path: '/routeA/:a', method: 'POST' }
+			},
+			{
+				introspectOptions: { a: true },
+				metadata: { path: '/routeAB/:ab', method: 'PUT' }
+			}
+		])
+		expect(bData).toEqual([
+			{
+				introspectOptions: { b: true },
+				metadata: { path: '/routeB/:b', method: 'DELETE' }
+			},
+			{
+				introspectOptions: { b: true },
+				metadata: { path: '/routeAB/:ab', method: 'PUT' }
+			}
+		])
+	})
+
+	it('introspect: not called for disabled macro', () => {
+		const introspectCalled: boolean[] = []
+
+		const fgaPlugin = new Elysia({ name: 'fga-plugin' }).macro({
+			a: {
+				introspect() {
+					introspectCalled.push(true)
+				}
+			}
+		})
+
+		const app = new Elysia()
+			.use(fgaPlugin)
+			.get('/enabled', () => 'hello', {
+				a: true
+			})
+			.get('/disabled', () => 'hi', {
+				a: false
+			})
+
+		// The macro's introspect should be called for 'enabled' but not 'disabled'
+		expect(introspectCalled.length).toBe(1)
+	})
+
+	it('introspect: not run for macro keys set to false', () => {
+		// This test documents the current behavior.
+		const calls: any[] = []
+
+		const plugin = new Elysia({ name: 'macro-plugin' }).macro({
+			a: {
+				introspect(opt, meta) {
+					calls.push([opt, meta])
+				}
+			}
+		})
+
+		const app = new Elysia()
+			.use(plugin)
+			.get('/a', () => 1, { a: true })
+			.get('/b', () => 2, { a: false })
+
+		expect(calls.length).toBe(1)
+		expect(calls[0]?.[0]).toEqual({ a: true })
+		// No call with { fga: false }
+	})
 })

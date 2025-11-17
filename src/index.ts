@@ -117,6 +117,7 @@ import type {
 	MapResponse,
 	Checksum,
 	MacroManager,
+	MacroIntrospectionMetadata,
 	MacroToProperty,
 	TransformHandler,
 	MetadataBase,
@@ -280,6 +281,16 @@ export default class Elysia<
 			)
 		}
 	}
+
+	// Stores macro options applied via `.guard({ ...macros })`
+	// so we can run macro `introspect` once per route with full metadata.
+	// Is there a way to do this without a separate store?
+	protected guardMacroOptions: Record<string, any> = {}
+
+	// Flag to skip macro introspection for routes added to child instances inside groups
+	// Macro introspection will happen when routes are added to the parent with the fully-resolved path
+	// Is there a way to do this without a flag?
+	protected skipMacroIntrospection?: boolean
 
 	protected standaloneValidator: StandaloneValidator = {
 		global: null,
@@ -487,7 +498,51 @@ export default class Elysia<
 
 		localHook ??= {}
 
-		this.applyMacro(localHook)
+		// Normalize path before macro introspection to ensure metadata has the correct path
+		if (path !== '' && path.charCodeAt(0) !== 47) path = '/' + path
+		if (this.config.prefix && !skipPrefix) path = this.config.prefix + path
+
+		// Run macro introspection for guard-level macros (configured via `.guard({ macro: ... })`)
+		// once per route with the fully-resolved path.
+		if (
+			this.guardMacroOptions &&
+			Object.keys(this.guardMacroOptions).length
+		) {
+			const macro = this.extender.macro
+
+			for (const [key, value] of Object.entries(this.guardMacroOptions)) {
+				if (!(key in macro)) continue
+
+				const macroDef = macro[key]
+				const macroHook =
+					typeof macroDef === 'function' ? macroDef(value) : macroDef
+
+				if (
+					!macroHook ||
+					(typeof macroDef === 'object' && value === false)
+				)
+					continue
+
+				const introspectFn = 
+					typeof macroHook === 'object' && macroHook !== null && 'introspect' in macroHook
+						? (macroHook as { introspect?: (option: Record<string, any>, context: MacroIntrospectionMetadata) => unknown }).introspect
+						: undefined
+
+				if (typeof introspectFn === 'function') {
+					const introspectOptions: Record<string, any> = {
+						[key]: value
+					}
+
+					introspectFn(introspectOptions, { path, method })
+				}
+			}
+		}
+
+		// Skip macro introspection for routes added to child instances inside groups
+		// Macro introspection will happen when routes are added to the parent with the fully-resolved path
+		if (!this.skipMacroIntrospection) {
+			this.applyMacro(localHook, localHook, { metadata: { path, method } })
+		}
 
 		let standaloneValidators = [] as InputSchema[]
 
@@ -510,9 +565,6 @@ export default class Elysia<
 			standaloneValidators = standaloneValidators.concat(
 				this.standaloneValidator.global
 			)
-
-		if (path !== '' && path.charCodeAt(0) !== 47) path = '/' + path
-		if (this.config.prefix && !skipPrefix) path = this.config.prefix + path
 
 		if (localHook?.type)
 			switch (localHook.type) {
@@ -3976,11 +4028,21 @@ export default class Elysia<
 			scoped: [...(this.standaloneValidator.scoped ?? [])],
 			global: [...(this.standaloneValidator.global ?? [])]
 		}
+		// Mark this instance as being inside a group to skip macro introspection
+		// Macro introspection will happen when routes are added to the parent with the fully-resolved path
+		instance.skipMacroIntrospection = true
 
 		const isSchema = typeof schemaOrRun === 'object'
 		const sandbox = (isSchema ? run! : schemaOrRun)(instance)
 		this.singleton = mergeDeep(this.singleton, instance.singleton) as any
 		this.definitions = mergeDeep(this.definitions, instance.definitions)
+		// Merge macros from the group instance so introspect can be called when routes are added to the parent
+		if (isNotEmpty(instance.extender.macro)) {
+			this.extender.macro = {
+				...this.extender.macro,
+				...instance.extender.macro
+			}
+		}
 
 		if (sandbox.event.request?.length)
 			this.event.request = [
@@ -4472,6 +4534,30 @@ export default class Elysia<
 	): AnyElysia {
 		if (!run) {
 			if (typeof hook === 'object') {
+				// Capture guard-level macro options so we can introspect them per-route later
+				const macro = this.extender.macro
+				if (macro && typeof macro === 'object') {
+					const guardOptions: Record<string, any> = {}
+
+					for (const [key, value] of Object.entries(hook)) {
+						if (!(key in macro)) continue
+
+						const macroDef = macro[key]
+
+						// Match object-style macro semantics: value=false disables the macro entirely
+						if (typeof macroDef === 'object' && value === false)
+							continue
+
+						guardOptions[key] = value
+					}
+
+					if (Object.keys(guardOptions).length)
+						this.guardMacroOptions = {
+							...this.guardMacroOptions,
+							...guardOptions
+						}
+				}
+
 				this.applyMacro(hook)
 
 				if (hook.detail) {
@@ -5390,8 +5476,13 @@ export default class Elysia<
 		appliable: AnyLocalHook = localHook,
 		{
 			iteration = 0,
-			applied = {}
-		}: { iteration?: number; applied?: { [key: number]: true } } = {}
+			applied = {},
+			metadata
+		}: {
+			iteration?: number
+			applied?: { [key: number]: true }
+			metadata?: MacroIntrospectionMetadata
+		} = {}
 	) {
 		if (iteration >= 16) return
 		const macro = this.extender.macro
@@ -5429,7 +5520,17 @@ export default class Elysia<
 				}
 
 				if (k === 'introspect') {
-					value?.(localHook)
+					// Only run introspect when route metadata is available.
+					// Guard-level macros (configured via `.guard({ macro: ... })`)
+					// are introspected per-route in `add`.
+					if (metadata) {
+						// Call introspect with only the options relevant to the current macro key
+						const introspectOptions: Record<string, any> = {
+							[key]: appliable[key]
+						}
+
+						value?.(introspectOptions, metadata)
+					}
 
 					delete localHook[key]
 					continue
@@ -5449,7 +5550,7 @@ export default class Elysia<
 					this.applyMacro(
 						localHook,
 						{ [k]: value },
-						{ applied, iteration: iteration + 1 }
+						{ applied, iteration: iteration + 1, metadata }
 					)
 
 					delete localHook[key]
@@ -8214,6 +8315,7 @@ export type {
 	MapResponse,
 	BaseMacro,
 	MacroManager,
+	MacroIntrospectionMetadata,
 	MacroToProperty,
 	MergeElysiaInstances,
 	MaybeArray,
